@@ -31,7 +31,13 @@ from b3alien import b3cube, griis, simulation, utils
 
 ROOT = Path(__file__).resolve().parents[1]
 
-FIELDS = ["alien_richness", "alien_occurrences", "richness", "occurrences", "observers"]
+FIELDS = ["alien_richness", "alien_occurrences", "invasive_richness", "invasive_occurrences",
+          "richness", "occurrences", "observers"]
+
+SUBSETS = {
+    "all": "All alien species of the checklist",
+    "invasive": "Alien species assessed as invasive (GRIIS isInvasive)",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +129,20 @@ def load_checklist(coldp, match_dir, rematch):
     return cl, merged, profile
 
 
-def grid_layers(cube, alien_keys):
+def invasive_keys(merged, profile):
+    """GBIF keys of the checklist taxa flagged as invasive in the species profile."""
+    invasive_ids = set(profile.loc[profile["isInvasive"] == "Invasive", "id"].astype(str))
+    keys = set()
+    for _, r in merged[merged["id"].astype(str).isin(invasive_ids)].iterrows():
+        val = r["speciesKey"]
+        if isinstance(val, str) and val.startswith("["):
+            parsed = ast.literal_eval(val)
+            if parsed != ["Uncertain"]:
+                keys.add(str(parsed[0]))
+    return sorted(keys)
+
+
+def grid_layers(cube, alien_keys, inv_keys):
     """Per-cell statistics on the native 1 km grid and aggregated to 10 km."""
     print("3/5 Grid layers")
     df = cube.df
@@ -136,6 +155,8 @@ def grid_layers(cube, alien_keys):
     species_cats = df["specieskey"].cat.categories
     is_alien_cat = np.asarray(pd.Index(species_cats).astype(str).isin([str(k) for k in alien_keys]))
     alien = is_alien_cat[sp]
+    is_inv_cat = np.asarray(pd.Index(species_cats).astype(str).isin([str(k) for k in inv_keys]))
+    invasive = is_inv_cat[sp]
 
     parsed = utils.parse_eea_cellcode(pd.Series(df["cellcode"].cat.categories))
     res = int(parsed["resolution"].iloc[0])
@@ -160,6 +181,8 @@ def grid_layers(cube, alien_keys):
         stats = {
             "alien_richness": nunique(alien),
             "alien_occurrences": np.bincount(tcell[alien], weights=occ[alien], minlength=n_cells),
+            "invasive_richness": nunique(invasive),
+            "invasive_occurrences": np.bincount(tcell[invasive], weights=occ[invasive], minlength=n_cells),
             "richness": nunique(np.ones_like(alien)),
             "occurrences": np.bincount(tcell, weights=occ, minlength=n_cells),
             "observers": np.bincount(tcell, weights=obs, minlength=n_cells),
@@ -180,38 +203,32 @@ def grid_layers(cube, alien_keys):
     return layers
 
 
-def time_series(cube, cl, start, end, n_boot):
-    print("4/5 Rate of establishment (Solow-Costello + bootstrap)")
-    d_s, d_c = b3cube.cumulative_species(cube, cl.species)
+def rate_of_establishment(cube, keys, start, end, n_boot, label):
+    """Discoveries, Solow-Costello fit and bootstrap intervals for a set of species keys."""
+    print(f"  {label}: {len(keys)} species")
+    d_s, d_c = b3cube.cumulative_species(cube, keys)
     years_all, rate_all = b3cube.calculate_rate(d_c)
     df = pd.DataFrame({"year": years_all, "rate": rate_all})
     years, rate = b3cube.filter_time_window(df, start, end)
 
     C1, vec1 = simulation.simulate_solow_costello_scipy(years, rate)
-    boot = simulation.parallel_bootstrap_solow_costello(years, rate, n_iterations=n_boot)
-    curves = boot["c1_all"]                       # cumulative fitted curves (B, T)
-    annual = np.diff(curves, axis=1, prepend=0)   # fitted annual numbers
-
-    print("  survey effort")
-    observers = b3cube.get_survey_effort(cube, calc_type="distinct")
-    observers["year"] = observers["date"].dt.year
-    totals = b3cube.get_survey_effort(cube, calc_type="total")
-    totals = totals.groupby(totals["time"].dt.year)["total_occurrences"].sum()
-    effort = observers.set_index("year")[["distinct_observers"]].join(totals.rename("occurrences"), how="outer")
-    effort = effort[(effort.index >= 1900)].fillna(0)
-
     beta1 = float(vec1[1])
     ts = {
-        "window": [int(start), int(end)],
+        "label": SUBSETS[label],
+        "species": len(keys),
+        "observed": int(d_s["species"].nunique()),
         "years": [int(v) for v in years],
         "discoveries": _round(rate, 0),
         "cumulative": _round(np.cumsum(rate), 0),
-        "fit": {
-            "cumulative": _round(np.cumsum(C1), 2),
-            "annual": _round(C1, 3),
-            "beta1": round(beta1, 5),
-        },
-        "bootstrap": {
+        "fit": {"cumulative": _round(np.cumsum(C1), 2), "annual": _round(C1, 3), "beta1": round(beta1, 5)},
+        "bootstrap": None,
+        "all_years": {"years": [int(v) for v in years_all], "discoveries": _round(rate_all, 0)},
+    }
+    try:
+        boot = simulation.parallel_bootstrap_solow_costello(years, rate, n_iterations=n_boot)
+        curves = boot["c1_all"]                       # cumulative fitted curves (B, T)
+        annual = np.diff(curves, axis=1, prepend=0)   # fitted annual numbers
+        ts["bootstrap"] = {
             "iterations": int(len(curves)),
             "beta1_ci": _round(boot["beta1_ci"], 5),
             "cumulative": {"mean": _round(boot["c1_mean"], 2), "lower": _round(boot["c1_lower"], 2),
@@ -219,13 +236,73 @@ def time_series(cube, cl, start, end, n_boot):
             "annual": {"mean": _round(annual.mean(axis=0), 3),
                        "lower": _round(np.percentile(annual, 2.5, axis=0), 3),
                        "upper": _round(np.percentile(annual, 97.5, axis=0), 3)},
-        },
-        "all_years": {"years": [int(v) for v in years_all], "discoveries": _round(rate_all, 0)},
-        "effort": {"years": [int(v) for v in effort.index],
-                   "distinct_observers": _round(effort["distinct_observers"], 0),
-                   "occurrences": _round(effort["occurrences"], 0)},
-    }
+        }
+    except RuntimeError as e:  # e.g. too few discoveries for a stable fit
+        print(f"  bootstrap failed for {label}: {e}")
     return ts, d_s
+
+
+def indicator(ts):
+    """Headline numbers of one subset."""
+    beta1 = ts["fit"]["beta1"]
+    boot = ts["bootstrap"]
+    ci = boot["beta1_ci"] if boot else None
+    annual = boot["annual"] if boot else {"mean": ts["fit"]["annual"], "lower": [None], "upper": [None]}
+    return {
+        "label": ts["label"],
+        "species": ts["species"],
+        "observed": ts["observed"],
+        "discoveries_in_window": int(sum(v or 0 for v in ts["discoveries"])),
+        "beta1": beta1,
+        "beta1_ci": ci,
+        "annual_change_pct": round((math.exp(beta1) - 1) * 100, 2),
+        "annual_change_pct_ci": [round((math.exp(b) - 1) * 100, 2) for b in ci] if ci else None,
+        "fitted_rate_last_year": annual["mean"][-1],
+        "fitted_rate_last_year_ci": [annual["lower"][-1], annual["upper"][-1]],
+    }
+
+
+def sampling_effort(cube):
+    observers = b3cube.get_survey_effort(cube, calc_type="distinct")
+    observers["year"] = observers["date"].dt.year
+    totals = b3cube.get_survey_effort(cube, calc_type="total")
+    totals = totals.groupby(totals["time"].dt.year)["total_occurrences"].sum()
+    effort = observers.set_index("year")[["distinct_observers"]].join(totals.rename("occurrences"), how="outer")
+    effort = effort[(effort.index >= 1900)].fillna(0)
+    return {"years": [int(v) for v in effort.index],
+            "distinct_observers": _round(effort["distinct_observers"], 0),
+            "occurrences": _round(effort["occurrences"], 0)}
+
+
+def invasive_species_cells(cube, inv_keys, species):
+    """Per invasive species: occurrences and year of first record per 1 km cell."""
+    df = cube.df
+    keys = set(str(k) for k in inv_keys)
+    cats = pd.Index(df["specieskey"].cat.categories).astype(str)
+    mask = np.asarray(cats.isin(keys))[df["specieskey"].cat.codes.to_numpy()]
+    sub = pd.DataFrame({
+        "cell": df["cellcode"].to_numpy()[mask].astype(str),
+        "species": df["specieskey"].to_numpy()[mask].astype(str),
+        "year": pd.Series(df["yearmonth"].to_numpy()[mask]).astype(str).str[:4].astype(int).to_numpy(),
+        "occ": df["occurrences"].to_numpy()[mask],
+    })
+    agg = sub.groupby(["species", "cell"]).agg(occurrences=("occ", "sum"), first_year=("year", "min")).reset_index()
+    parsed = utils.parse_eea_cellcode(agg["cell"])
+    res = int(parsed["resolution"].iloc[0])
+    agg["e"] = parsed["x"].to_numpy() // res
+    agg["n"] = parsed["y"].to_numpy() // res
+    names = {s["key"]: s["name"] for s in species if s["key"]}
+    out = {"resolution": res, "crs": utils.EEA_CRS, "fields": ["e", "n", "occurrences", "first_year"], "species": {}}
+    for key, g in agg.groupby("species"):
+        out["species"][key] = {
+            "name": names.get(key, key),
+            "occurrences": int(g["occurrences"].sum()),
+            "cells": int(len(g)),
+            "first_year": int(g["first_year"].min()),
+            "rows": g[["e", "n", "occurrences", "first_year"]].astype(np.int64).to_numpy().tolist(),
+        }
+    print(f"  {len(out['species'])} invasive species, {len(agg):,} species x cell records")
+    return out
 
 
 def species_table(cl, merged, profile, d_s, cube):
@@ -294,12 +371,20 @@ def main():
     months = sorted(cube.df["yearmonth"].cat.categories.astype(str))
     print(f"  {len(cube.df):,} records, {cube.data.shape[1]:,} cells, {cube.data.shape[2]:,} species")
 
-    layers = grid_layers(cube, cl.species)
-    ts, d_s = time_series(cube, cl, args.start, args.end, args.bootstrap)
+    inv_keys = invasive_keys(merged, profile)
+    layers = grid_layers(cube, cl.species, inv_keys)
+
+    print("4/5 Rate of establishment (Solow-Costello + bootstrap)")
+    ts_all, d_s = rate_of_establishment(cube, cl.species, args.start, args.end, args.bootstrap, "all")
+    ts_inv, _ = rate_of_establishment(cube, inv_keys, args.start, args.end, args.bootstrap, "invasive")
+    print("  survey effort")
+    ts = {"window": [int(args.start), int(args.end)], "effort": sampling_effort(cube),
+          "subsets": {"all": ts_all, "invasive": ts_inv}}
+
     species = species_table(cl, merged, profile, d_s, cube)
+    inv_cells = invasive_species_cells(cube, inv_keys, species)
 
     observed = [s for s in species if s["observed"]]
-    beta1 = ts["fit"]["beta1"]
     summary = {
         "region": args.region,
         "generated": date.today().isoformat(),
@@ -310,6 +395,7 @@ def main():
             "species": sum(s["matched"] for s in species),
             "unmatched": sum(not s["matched"] for s in species),
             "observed": len(observed),
+            "invasive": sum(s["invasive"] and s["matched"] for s in species),
             "invasive_observed": sum(s["invasive"] for s in observed),
         },
         "cube": {
@@ -320,14 +406,7 @@ def main():
             "resolution_m": layers[min(layers, key=lambda k: layers[k]["resolution"])]["resolution"],
             "period": [months[0], months[-1]],
         },
-        "indicator": {
-            "discoveries_in_window": int(sum(v or 0 for v in ts["discoveries"])),
-            "beta1": beta1,
-            "beta1_ci": ts["bootstrap"]["beta1_ci"],
-            "annual_change_pct": round((math.exp(beta1) - 1) * 100, 2),
-            "annual_change_pct_ci": [round((math.exp(b) - 1) * 100, 2) for b in ts["bootstrap"]["beta1_ci"]],
-            "fitted_rate_last_year": ts["bootstrap"]["annual"]["mean"][-1],
-        },
+        "indicators": {"all": indicator(ts_all), "invasive": indicator(ts_inv)},
         "sources": {
             "cube": _gbif_download_metadata(args.cube_doi),
             "checklist": _checklist_metadata(args.checklist),
@@ -339,6 +418,7 @@ def main():
     _write_json(out / "summary.json", summary)
     _write_json(out / "timeseries.json", ts)
     _write_json(out / "species.json", species)
+    _write_json(out / "invasive_species_cells.json", inv_cells)
     for label, layer in layers.items():
         _write_json(out / f"grid_{label}.json", layer)
 

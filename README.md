@@ -15,10 +15,14 @@ embedded component by component, or used as a data source for a portal's own cha
 
 - **Headline indicators**: alien species on the checklist, species recorded in GBIF, new species in
   the analysis window, the fitted rate of establishment and its trend (with 95% confidence intervals).
-- **Interactive map** on the EEA reference grid, with a choice of base maps: alien species richness,
-  occurrences of alien species, total species richness and sampling effort. The grid is shown at
+  A switch shows the indicator for **all alien species** or only for the species **assessed as invasive**
+  (`isInvasive` in the GRIIS species profile).
+- **Interactive map** on the EEA reference grid, with a choice of base maps: alien and invasive species
+  richness and occurrences, total species richness and sampling effort. The grid is shown at
   10 km when zoomed out and at 1 km when zoomed in. The current view is kept in the URL
   (`#zoom/lat/lon`) so it can be shared.
+- **Single invasive species**: the cells where one invasive species was recorded, coloured by number of
+  occurrences or by year of first record, with a time slider (and play button) to follow its spread.
 - **Zoomable charts**: cumulative discoveries with the Solow-Costello model, new species per year with
   the fitted rate of establishment, and sampling effort over time. Each chart can be exported as PNG.
 - **Species table**: searchable and sortable, with filters on invasiveness and habitat, and CSV export.
@@ -89,6 +93,8 @@ intervals vary slightly between runs.
 
 Every block of the page can be shown on its own with the `embed` URL parameter:
 
+Add `subset=invasive` to show the indicator cards and trend charts for the invasive species only.
+
 | `embed=` | Component |
 |---|---|
 | `indicators` | Headline indicator cards |
@@ -98,7 +104,9 @@ Every block of the page can be shown on its own with the `embed` URL parameter:
 | `effort` | Sampling effort over time |
 | `species` | Species table |
 
-Map layers: `alien_richness`, `alien_occurrences`, `richness`, `observers`, `occurrences`.
+Map layers: `alien_richness`, `alien_occurrences`, `invasive_richness`, `invasive_occurrences`,
+`richness`, `observers`, `occurrences`, and `species` for one invasive species
+(`&species=<GBIF key>`, optional `&color=year` and `&year=<last year shown>`).
 Base maps: `light`, `osm`, `satellite`. A map view can be fixed with the URL hash
 (`#zoom/latitude/longitude`).
 
@@ -114,10 +122,11 @@ The JSON files in `site/data/` can be consumed directly by a portal's own compon
 
 | File | Content |
 |---|---|
-| `summary.json` | Headline indicators, analysis window, data sources with citations and licences |
-| `timeseries.json` | Years, discoveries, cumulative counts, model fit, bootstrap intervals, sampling effort |
+| `summary.json` | Headline indicators per subset (`indicators.all`, `indicators.invasive`), analysis window, data sources with citations and licences |
+| `timeseries.json` | Sampling effort, and per subset (`subsets.all`, `subsets.invasive`): years, discoveries, cumulative counts, model fit, bootstrap intervals |
 | `species.json` | One record per checklist taxon: name, GBIF key, invasive, habitat, first record, cells, occurrences |
-| `grid_10km.json`, `grid_1km.json` | Grid layers: `rows` of `[e, n, alien_richness, alien_occurrences, richness, occurrences, observers]` |
+| `grid_10km.json`, `grid_1km.json` | Grid layers: `rows` of `[e, n, alien_richness, alien_occurrences, invasive_richness, invasive_occurrences, richness, occurrences, observers]` |
+| `invasive_species_cells.json` | Per invasive species (by GBIF key): `rows` of `[e, n, occurrences, first_year]` on the 1 km grid |
 
 A grid cell's lower-left corner is `(e × resolution, n × resolution)` in EPSG:3035, which corresponds to
 the EEA cell code `<resolution>E<e>N<n>` (e.g. `1kmE2639N1762`). `site/js/eea.js` shows how to turn the

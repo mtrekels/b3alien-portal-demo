@@ -46,14 +46,19 @@ function band(x, lower, upper, name, color) {
   ];
 }
 
-/** Cumulative discoveries with the Solow-Costello fit and bootstrap 95% CI. */
+/**
+ * Cumulative discoveries with the Solow-Costello fit and bootstrap 95% CI.
+ * `ts` is one subset of timeseries.json plus `window` and `noun` (e.g. "alien species").
+ * Without bootstrap results (too few discoveries), the plain model fit is shown.
+ */
 export function plotCumulative(el, ts) {
   const x = ts.years;
-  const b = ts.bootstrap.cumulative;
+  const b = ts.bootstrap ? ts.bootstrap.cumulative : null;
   const traces = [
-    ...band(x, b.lower, b.upper, "95% confidence interval (bootstrap)", COLORS.band),
+    ...(b ? band(x, b.lower, b.upper, "95% confidence interval (bootstrap)", COLORS.band) : []),
     {
-      x, y: b.mean, name: "Solow-Costello model (bootstrap mean)", mode: "lines",
+      x, y: b ? b.mean : ts.fit.cumulative,
+      name: b ? "Solow-Costello model (bootstrap mean)" : "Solow-Costello model", mode: "lines",
       line: { color: COLORS.fit, width: 2.5, dash: "dash" },
       hovertemplate: "%{y:.0f}",
     },
@@ -63,22 +68,23 @@ export function plotCumulative(el, ts) {
       hovertemplate: "%{y:.0f}",
     },
   ];
-  Plotly.newPlot(el, traces, layout({
-    yaxis: { title: "Cumulative number of alien species", gridcolor: "#e2e8f0", rangemode: "tozero" },
+  Plotly.react(el, traces, layout({
+    yaxis: { title: `Cumulative number of ${ts.noun}`, gridcolor: "#e2e8f0", rangemode: "tozero" },
     xaxis: { title: "Year", gridcolor: "#e2e8f0" },
   }), config("cumulative_discoveries"));
 }
 
-/** New alien species per year (bars) with the fitted annual rate. */
+/** New species per year (bars) with the fitted annual rate. */
 export function plotAnnual(el, ts) {
   const [start, end] = ts.window;
   const all = ts.all_years;
   const inWindow = all.years.map((y) => y >= start && y <= end);
-  const b = ts.bootstrap.annual;
+  const b = ts.bootstrap ? ts.bootstrap.annual : null;
+  const fitted = b ? b.mean : ts.fit.annual;
   const traces = [
     {
       x: all.years.filter((_, i) => inWindow[i]), y: all.discoveries.filter((_, i) => inWindow[i]),
-      type: "bar", name: "New alien species first recorded", marker: { color: COLORS.bars },
+      type: "bar", name: `New ${ts.noun} first recorded`, marker: { color: COLORS.bars },
       hovertemplate: "%{y:.0f}<extra>first recorded</extra>",
     },
     {
@@ -86,19 +92,18 @@ export function plotAnnual(el, ts) {
       type: "bar", name: "Outside the analysis window", marker: { color: COLORS.barsOut },
       hovertemplate: "%{y:.0f}<extra>first recorded</extra>", visible: "legendonly",
     },
-    ...band(ts.years, b.lower, b.upper, "95% confidence interval (bootstrap)", COLORS.band),
+    ...(b ? band(ts.years, b.lower, b.upper, "95% confidence interval (bootstrap)", COLORS.band) : []),
     {
-      x: ts.years, y: b.mean, name: "Fitted rate of establishment", mode: "lines",
+      x: ts.years, y: fitted, name: "Fitted rate of establishment", mode: "lines",
       line: { color: COLORS.fit, width: 2.5 }, hovertemplate: "%{y:.1f} per year<extra>fitted</extra>",
     },
   ];
   // Scale the y-axis to the analysis window (early years can have many first records).
-  const yMax = Math.max(...all.discoveries.filter((_, i) => inWindow[i]), ...b.upper) * 1.1;
-  Plotly.newPlot(el, traces, layout({
+  const yMax = Math.max(1, ...all.discoveries.filter((_, i) => inWindow[i]), ...(b ? b.upper : fitted)) * 1.1;
+  Plotly.react(el, traces, layout({
     bargap: 0.15,
     yaxis: { title: "Species per year", gridcolor: "#e2e8f0", range: [0, yMax] },
     xaxis: { title: "Year", gridcolor: "#e2e8f0", range: [start - 0.5, end + 0.5] },
-    shapes: [],
   }), config("annual_rate"));
 }
 
